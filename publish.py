@@ -111,10 +111,20 @@ def ics_str(component: dict, key: str) -> str:
         return ""
     if hasattr(val, "to_ical"):
         try:
-            return val.to_ical().decode("utf-8", errors="replace").strip()
+            raw = val.to_ical().decode("utf-8", errors="replace")
         except Exception:
-            pass
-    return str(val).strip()
+            raw = str(val)
+    else:
+        raw = str(val)
+    # Undo ICS text escaping: \,  \;  \n  \\
+    raw = (
+        raw.replace("\\,", ",")
+           .replace("\\;", ";")
+           .replace("\\n", "\n")
+           .replace("\\N", "\n")
+           .replace("\\\\", "\\")
+    )
+    return raw.strip()
 
 
 def ics_dt(component: dict, key: str) -> int | None:
@@ -211,20 +221,25 @@ def record_published(conn, d_tag: str, chash: str, event_id: str):
 # Event construction
 # ---------------------------------------------------------------------------
 
-def make_calendar_event(cfg: dict) -> Event:
+def make_calendar_event(cfg: dict, pubkey_hex: str, event_d_tags: list[str]) -> Event:
+    """Build the kind 31924 calendar, listing every event via an `a` tag."""
     cal = cfg["calendar"]
+    tags = [
+        ["d", cal["d"]],
+        ["title", cal["title"]],
+    ]
+    for d_tag in event_d_tags:
+        tags.append(["a", f"31923:{pubkey_hex}:{d_tag}"])
     return Event(
         kind=31924,
         content=cal["description"],
-        tags=[
-            ["d", cal["d"]],
-            ["title", cal["title"]],
-        ],
+        tags=tags,
     )
 
 
 def make_calendar_event_nostr(cfg, pubkey_hex, title, start, end, location, url,
                                image, tags, d_tag, duration, template) -> Event:
+    """Build a kind 31923 event."""
     cal_coord = f"31924:{pubkey_hex}:{cfg['calendar']['d']}"
     final_end = end if end is not None else start + duration
 
@@ -347,30 +362,38 @@ def main():
 
     if dry_run:
         log.info("DRY RUN complete. Would publish %d, skipped_no_rss=%d",
-                 len([x for x in vevents]), skipped_no_rss)
+                 len(to_publish), skipped_no_rss)
         return
 
     log.info("Publishing %d new/changed events (skipped %d unchanged, %d without RSS)",
              len(to_publish), skipped, skipped_no_rss)
 
-    if not to_publish:
-        log.info("Nothing to do.")
-        return
+    # Build the full set of d-tags the calendar should reference:
+    # everything already in the DB, plus everything about to be published.
+    rows = conn.execute("SELECT d_tag FROM published").fetchall()
+    all_d_tags = {row[0] for row in rows}
+    for d_tag, _, _ in to_publish:
+        all_d_tags.add(d_tag)
+    all_d_tags = sorted(all_d_tags)
 
-    cal_ev = make_calendar_event(cfg)
+    log.info("Calendar will reference %d events", len(all_d_tags))
+
+    cal_ev = make_calendar_event(cfg, pubkey_hex, all_d_tags)
     cal_ev.sign(pk.hex())
 
     relay_manager = RelayManager(timeout=6)
     for r in relays:
         relay_manager.add_relay(r)
 
-    relay_manager.publish_event(cal_ev)
-    log.info("Published calendar kind 31924 (d=%s)", cfg["calendar"]["d"])
-
+    # Publish events first, then the calendar that references them.
     for d_tag, chash, ev in to_publish:
         ev.sign(pk.hex())
         relay_manager.publish_event(ev)
         log.info("Queued event %s — %s", d_tag, ev.content.split("\n", 1)[0])
+
+    relay_manager.publish_event(cal_ev)
+    log.info("Queued calendar kind 31924 (d=%s) referencing %d events",
+             cfg["calendar"]["d"], len(all_d_tags))
 
     relay_manager.run_sync()
     time.sleep(2)
@@ -379,7 +402,8 @@ def main():
     for d_tag, chash, ev in to_publish:
         record_published(conn, d_tag, chash, ev.id)
 
-    log.info("Done. %d events published.", len(to_publish))
+    log.info("Done. %d events published, calendar references %d.",
+             len(to_publish), len(all_d_tags))
 
 
 if __name__ == "__main__":
