@@ -1,0 +1,39 @@
+# Copy this file to config.toml and fill in your secret key:
+#     cp config.toml.example config.toml
+#     chmod 600 config.toml
+#
+# config.toml is gitignored and must never be committed.
+
+# Nostr secret key (nsec1... or 64-char hex).
+secret_key = "nsec1_REPLACE_ME"
+
+# Relays to publish to. Always prefixed with wss://
+relays = [
+    "wss://basspistol.org",
+    "wss://nos.lol",
+]
+
+# Feed sources
+ics_url = "https://do.basspistol.org/feed/ics?show_recurrent=true"
+rss_url = "https://do.basspistol.org/feed/rss?show_recurrent=true"
+
+# Only publish events that also appear in the RSS feed.
+# This tracks the "announcement stream" rather than the full ICS backlog.
+rss_only = true
+
+# Local paths (relative to script directory)
+db_path = "events.db"
+log_path = "publish.log"
+
+# Default end time offset when DTEND is missing (seconds)
+default_duration = 3600
+
+# Content template. {title}, {location}, {url} are substituted.
+content_template = """{title}
+📍 {location}
+🔗 {url}"""
+
+[calendar]
+d = "basspistol-do"
+title = "Basspistol Do 🗓️"
+description = "Underground events promoted by the people, for the people. Ad-free and decentralized."
