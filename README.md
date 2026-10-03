@@ -59,12 +59,12 @@ wheels exist and installation is much faster.
 
 ## Install
 
-Clone to `/opt/nostr-calendar`:
+Clone to `/opt/event-gun`:
 
 ```bash
-sudo git clone <repo-url> /opt/nostr-calendar
-sudo chown -R "$USER:$USER" /opt/nostr-calendar
-cd /opt/nostr-calendar
+sudo git clone <repo-url> /opt/event-gun
+sudo chown -R "$USER:$USER" /opt/event-gun
+cd /opt/event-gun
 ./install.sh
 ```
 
@@ -131,7 +131,7 @@ published (including images and tags), and touches neither the database
 nor the relays:
 
 ```bash
-/opt/nostr-calendar/venv/bin/python /opt/nostr-calendar/publish.py --dry-run
+/opt/event-gun/venv/bin/python /opt/event-gun/publish.py --dry-run
 ```
 
 Sample output:
@@ -145,7 +145,7 @@ INFO DRY RUN complete. Would publish 104, skipped_no_rss=0
 Then run for real:
 
 ```bash
-/opt/nostr-calendar/venv/bin/python /opt/nostr-calendar/publish.py
+/opt/event-gun/venv/bin/python /opt/event-gun/publish.py
 ```
 
 Logs go to both stdout and `publish.log`.
@@ -161,7 +161,7 @@ crontab -e
 Add:
 
 ```
-*/30 * * * * /opt/nostr-calendar/run.sh >> /opt/nostr-calendar/cron.log 2>&1
+*/30 * * * * /opt/event-gun/run.sh >> /opt/event-gun/cron.log 2>&1
 ```
 
 `run.sh` resolves its own directory, `cd`s into it, and invokes the
@@ -212,13 +212,13 @@ existing events; nothing is duplicated.
 You're running the script with system Python. Use the virtualenv:
 
 ```bash
-/opt/nostr-calendar/venv/bin/python /opt/nostr-calendar/publish.py
+/opt/event-gun/venv/bin/python /opt/event-gun/publish.py
 ```
 
 or activate it first:
 
 ```bash
-source /opt/nostr-calendar/venv/bin/activate
+source /opt/event-gun/venv/bin/activate
 ./publish.py
 ```
 
