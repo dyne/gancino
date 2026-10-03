@@ -4,6 +4,9 @@ Fetch ICS + RSS events from do.basspistol.org and publish them as
 NIP-52 calendar events (kind 31923) to Nostr relays, requesting
 inclusion in a kind 31924 calendar.
 
+Only relays that accept the event kind without requiring NIP-42 auth
+are used. Relays that send an AUTH challenge are skipped.
+
 Usage:
     publish.py             # normal run
     publish.py --dry-run   # log what would be published, no DB writes, no relay calls
@@ -116,7 +119,6 @@ def ics_str(component: dict, key: str) -> str:
             raw = str(val)
     else:
         raw = str(val)
-    # Undo ICS text escaping: \,  \;  \n  \\
     raw = (
         raw.replace("\\,", ",")
            .replace("\\;", ";")
@@ -267,43 +269,52 @@ def make_calendar_event_nostr(cfg, pubkey_hex, title, start, end, location, url,
 
 
 # ---------------------------------------------------------------------------
-# Relay diagnostics
+# Relay filtering
 # ---------------------------------------------------------------------------
 
-def wait_for_relays(relay_manager, timeout: float = 10.0) -> bool:
-    """Wait until all relays report connected=True, or timeout elapses.
+def filter_relays_without_auth(relays: list[str], timeout: float = 8.0) -> list[str]:
+    """Probe each relay for an AUTH challenge on connect.
 
-    Returns True if all connected, False otherwise.
+    Returns the list of relays that did NOT send AUTH within the timeout.
+    Relays that sent AUTH are logged and excluded.
     """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        states = {url: r.connected for url, r in relay_manager.relays.items()}
-        if states and all(states.values()):
-            log.info("All relays connected: %s", states)
-            return True
-        time.sleep(0.25)
+    accepted = []
+    for url in relays:
+        rm = RelayManager(timeout=timeout)
+        rm.add_relay(url)
+        log.info("Probing %s for AUTH requirement …", url)
 
-    states = {url: r.connected for url, r in relay_manager.relays.items()}
-    log.warning("Timed out waiting for relays. States: %s", states)
-    return False
+        # Give the relay a moment to connect and (maybe) send AUTH.
+        deadline = time.time() + timeout
+        saw_auth = False
+        while time.time() < deadline:
+            relay = rm.relays.get(url)
+            if relay is None:
+                break
+            pool = getattr(relay, "message_pool", None)
+            queue = getattr(pool, "queue", None) if pool else None
+            if queue:
+                while queue:
+                    msg = queue.pop(0)
+                    if isinstance(msg, list) and len(msg) >= 1 and msg[0] == "AUTH":
+                        log.info("Relay %s requires AUTH — skipping.", url)
+                        saw_auth = True
+                        break
+                if saw_auth:
+                    break
+            time.sleep(0.25)
 
+        try:
+            rm.close_all_relay_connections()
+        except Exception:
+            pass
 
-def log_relay_states(relay_manager):
-    """Log connected state and any messages the relays sent back."""
-    for url, relay in relay_manager.relays.items():
-        log.info("Relay %s — connected=%s", url, relay.connected)
-        pool = getattr(relay, "message_pool", None)
-        if pool is None:
-            continue
-        queue = getattr(pool, "queue", None)
-        if not queue:
-            continue
-        while queue:
-            msg = queue.pop(0)
-            try:
-                log.info("  %s: %s", url, msg)
-            except Exception:
-                pass
+        if not saw_auth:
+            log.info("Relay %s does not require AUTH — will publish.", url)
+            accepted.append(url)
+        time.sleep(0.5)
+
+    return accepted
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +341,7 @@ def main():
     pubkey_hex = pk.public_key.hex()
 
     log.info("Using pubkey %s", pubkey_hex)
-    log.info("Relays: %s", ", ".join(relays))
+    log.info("Configured relays: %s", ", ".join(relays))
     log.info("rss_only=%s", rss_only)
 
     log.info("Fetching ICS …")
@@ -410,6 +421,14 @@ def main():
     log.info("Publishing %d new/changed events (skipped %d unchanged, %d without RSS)",
              len(to_publish), skipped, skipped_no_rss)
 
+    # --- Filter relays: skip any that require AUTH ------------------------
+    accepted_relays = filter_relays_without_auth(relays)
+    if not accepted_relays:
+        log.error("No relays accept publishing without AUTH. Aborting.")
+        return
+
+    log.info("Publishing to: %s", ", ".join(accepted_relays))
+
     # Build the full set of d-tags the calendar should reference:
     # everything already in the DB, plus everything about to be published.
     rows = conn.execute("SELECT d_tag FROM published").fetchall()
@@ -423,34 +442,22 @@ def main():
     cal_ev = make_calendar_event(cfg, pubkey_hex, all_d_tags)
     cal_ev.sign(pk.hex())
 
-    # Open relay connections and wait until they're actually connected
-    # before pushing messages over them.
-    relay_manager = RelayManager(timeout=30)
-    for r in relays:
+    # --- Publish ----------------------------------------------------------
+    relay_manager = RelayManager(timeout=5)
+    for r in accepted_relays:
         relay_manager.add_relay(r)
 
-    if not wait_for_relays(relay_manager, timeout=10.0):
-        log.warning("Proceeding despite not all relays being connected.")
-
-    # Publish the calendar FIRST so it isn't stuck behind a queue of events.
-    # Relays don't enforce ordering between an `a` reference and the event
-    # it points to; clients resolve references when they query.
     relay_manager.publish_event(cal_ev)
     log.info("Queued calendar kind 31924 (d=%s) referencing %d events",
              cfg["calendar"]["d"], len(all_d_tags))
 
-    # Then publish the events.
     for d_tag, chash, ev in to_publish:
         ev.sign(pk.hex())
         relay_manager.publish_event(ev)
         log.info("Queued event %s — %s", d_tag, ev.content.split("\n", 1)[0])
 
     relay_manager.run_sync()
-    time.sleep(10)
-
-    # Show what the relays said before we tear down the connections.
-    log_relay_states(relay_manager)
-
+    time.sleep(2)
     relay_manager.close_all_relay_connections()
 
     for d_tag, chash, ev in to_publish:
