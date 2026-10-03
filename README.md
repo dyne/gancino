@@ -1,6 +1,6 @@
-# nostr-calendar
+# Event Gun
 
-Fetch events from an ICS + RSS feed and publish them as [NIP-52](https://github.com/nostr-protocol/nips/blob/master/52.md)
+Fetch events from a Gancio's ICS + RSS feed and publish them as [NIP-52](https://github.com/nostr-protocol/nips/blob/master/52.md)
 calendar events (kind `31923`) to Nostr relays, requesting inclusion in a
 kind `31924` calendar.
 
