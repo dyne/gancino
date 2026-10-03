@@ -267,6 +267,46 @@ def make_calendar_event_nostr(cfg, pubkey_hex, title, start, end, location, url,
 
 
 # ---------------------------------------------------------------------------
+# Relay diagnostics
+# ---------------------------------------------------------------------------
+
+def wait_for_relays(relay_manager, timeout: float = 10.0) -> bool:
+    """Wait until all relays report connected=True, or timeout elapses.
+
+    Returns True if all connected, False otherwise.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        states = {url: r.connected for url, r in relay_manager.relays.items()}
+        if states and all(states.values()):
+            log.info("All relays connected: %s", states)
+            return True
+        time.sleep(0.25)
+
+    states = {url: r.connected for url, r in relay_manager.relays.items()}
+    log.warning("Timed out waiting for relays. States: %s", states)
+    return False
+
+
+def log_relay_states(relay_manager):
+    """Log connected state and any messages the relays sent back."""
+    for url, relay in relay_manager.relays.items():
+        log.info("Relay %s — connected=%s", url, relay.connected)
+        pool = getattr(relay, "message_pool", None)
+        if pool is None:
+            continue
+        queue = getattr(pool, "queue", None)
+        if not queue:
+            continue
+        while queue:
+            msg = queue.pop(0)
+            try:
+                log.info("  %s: %s", url, msg)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -310,6 +350,7 @@ def main():
     to_publish = []
     skipped = 0
     skipped_no_rss = 0
+    dry_run_count = 0
 
     for vev in vevents:
         uid = ics_str(vev, "UID")
@@ -348,6 +389,7 @@ def main():
         if dry_run:
             log.info("DRY RUN %s: title=%r image=%r tags=%r start=%d end=%s",
                      d_tag, title, image, tags, start, end)
+            dry_run_count += 1
             continue
 
         if already_published(conn, d_tag, chash):
@@ -362,7 +404,7 @@ def main():
 
     if dry_run:
         log.info("DRY RUN complete. Would publish %d, skipped_no_rss=%d",
-                 len(to_publish), skipped_no_rss)
+                 dry_run_count, skipped_no_rss)
         return
 
     log.info("Publishing %d new/changed events (skipped %d unchanged, %d without RSS)",
@@ -381,22 +423,34 @@ def main():
     cal_ev = make_calendar_event(cfg, pubkey_hex, all_d_tags)
     cal_ev.sign(pk.hex())
 
-    relay_manager = RelayManager(timeout=6)
+    # Open relay connections and wait until they're actually connected
+    # before pushing messages over them.
+    relay_manager = RelayManager(timeout=30)
     for r in relays:
         relay_manager.add_relay(r)
 
-    # Publish events first, then the calendar that references them.
+    if not wait_for_relays(relay_manager, timeout=10.0):
+        log.warning("Proceeding despite not all relays being connected.")
+
+    # Publish the calendar FIRST so it isn't stuck behind a queue of events.
+    # Relays don't enforce ordering between an `a` reference and the event
+    # it points to; clients resolve references when they query.
+    relay_manager.publish_event(cal_ev)
+    log.info("Queued calendar kind 31924 (d=%s) referencing %d events",
+             cfg["calendar"]["d"], len(all_d_tags))
+
+    # Then publish the events.
     for d_tag, chash, ev in to_publish:
         ev.sign(pk.hex())
         relay_manager.publish_event(ev)
         log.info("Queued event %s — %s", d_tag, ev.content.split("\n", 1)[0])
 
-    relay_manager.publish_event(cal_ev)
-    log.info("Queued calendar kind 31924 (d=%s) referencing %d events",
-             cfg["calendar"]["d"], len(all_d_tags))
-
     relay_manager.run_sync()
-    time.sleep(2)
+    time.sleep(10)
+
+    # Show what the relays said before we tear down the connections.
+    log_relay_states(relay_manager)
+
     relay_manager.close_all_relay_connections()
 
     for d_tag, chash, ev in to_publish:
