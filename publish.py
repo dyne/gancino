@@ -38,6 +38,9 @@ except ModuleNotFoundError:
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "config.toml"
 
+# Events stay in the kind 31924 listing for this long after their start time.
+GRACE_SECONDS = 86400  # 24 hours
+
 
 def load_config():
     with open(CONFIG_PATH, "rb") as f:
@@ -177,7 +180,7 @@ def day_timestamps(start: int, end: int | None) -> list[int]:
 
 
 # ---------------------------------------------------------------------------
-# Dedupe
+# Dedupe / state
 # ---------------------------------------------------------------------------
 
 def init_db(path: Path) -> sqlite3.Connection:
@@ -188,10 +191,16 @@ def init_db(path: Path) -> sqlite3.Connection:
             d_tag TEXT PRIMARY KEY,
             content_hash TEXT NOT NULL,
             event_id TEXT,
-            published_at INTEGER NOT NULL
+            published_at INTEGER NOT NULL,
+            start_ts INTEGER
         )
         """
     )
+    # Migration for databases created before start_ts existed.
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(published)")}
+    if "start_ts" not in cols:
+        conn.execute("ALTER TABLE published ADD COLUMN start_ts INTEGER")
+        log.info("Migrated: added start_ts column")
     conn.commit()
     return conn
 
@@ -211,10 +220,20 @@ def already_published(conn, d_tag: str, chash: str) -> bool:
     return row is not None and row[0] == chash
 
 
-def record_published(conn, d_tag: str, chash: str, event_id: str):
+def backfill_start_ts(conn, d_tag: str, start_ts: int):
+    """Fill in start_ts for legacy rows without republishing."""
     conn.execute(
-        "INSERT OR REPLACE INTO published (d_tag, content_hash, event_id, published_at) VALUES (?, ?, ?, ?)",
-        (d_tag, chash, event_id, int(time.time())),
+        "UPDATE published SET start_ts = ? WHERE d_tag = ? AND start_ts IS NULL",
+        (start_ts, d_tag),
+    )
+    conn.commit()
+
+
+def record_published(conn, d_tag: str, chash: str, event_id: str, start_ts: int):
+    conn.execute(
+        "INSERT OR REPLACE INTO published "
+        "(d_tag, content_hash, event_id, published_at, start_ts) VALUES (?, ?, ?, ?, ?)",
+        (d_tag, chash, event_id, int(time.time()), start_ts),
     )
     conn.commit()
 
@@ -284,7 +303,6 @@ def filter_relays_without_auth(relays: list[str], timeout: float = 8.0) -> list[
         rm.add_relay(url)
         log.info("Probing %s for AUTH requirement …", url)
 
-        # Give the relay a moment to connect and (maybe) send AUTH.
         deadline = time.time() + timeout
         saw_auth = False
         while time.time() < deadline:
@@ -358,10 +376,11 @@ def main():
 
     conn = init_db(SCRIPT_DIR / cfg.get("db_path", "events.db"))
 
-    to_publish = []
+    to_publish = []      # (d_tag, chash, start, ev)
     skipped = 0
     skipped_no_rss = 0
     dry_run_count = 0
+    backfilled = 0
 
     for vev in vevents:
         uid = ics_str(vev, "UID")
@@ -404,6 +423,13 @@ def main():
             continue
 
         if already_published(conn, d_tag, chash):
+            # Existing row — backfill start_ts if it's missing (legacy rows).
+            row = conn.execute(
+                "SELECT start_ts FROM published WHERE d_tag = ?", (d_tag,)
+            ).fetchone()
+            if row and row[0] is None:
+                backfill_start_ts(conn, d_tag, start)
+                backfilled += 1
             skipped += 1
             continue
 
@@ -411,15 +437,15 @@ def main():
             cfg, pubkey_hex, title, start, end, location, url,
             image, tags, d_tag, duration, template,
         )
-        to_publish.append((d_tag, chash, ev))
+        to_publish.append((d_tag, chash, start, ev))
 
     if dry_run:
         log.info("DRY RUN complete. Would publish %d, skipped_no_rss=%d",
                  dry_run_count, skipped_no_rss)
         return
 
-    log.info("Publishing %d new/changed events (skipped %d unchanged, %d without RSS)",
-             len(to_publish), skipped, skipped_no_rss)
+    log.info("Publishing %d new/changed events (skipped %d unchanged, %d without RSS, %d backfilled)",
+             len(to_publish), skipped, skipped_no_rss, backfilled)
 
     # --- Filter relays: skip any that require AUTH ------------------------
     accepted_relays = filter_relays_without_auth(relays)
@@ -429,11 +455,15 @@ def main():
 
     log.info("Publishing to: %s", ", ".join(accepted_relays))
 
-    # Build the full set of d-tags the calendar should reference:
-    # everything already in the DB, plus everything about to be published.
-    rows = conn.execute("SELECT d_tag FROM published").fetchall()
+    # Build the calendar listing.
+    # Only include events whose start_ts is set and within the grace window.
+    cutoff = int(time.time()) - GRACE_SECONDS
+    rows = conn.execute(
+        "SELECT d_tag FROM published WHERE start_ts IS NOT NULL AND start_ts >= ?",
+        (cutoff,),
+    ).fetchall()
     all_d_tags = {row[0] for row in rows}
-    for d_tag, _, _ in to_publish:
+    for d_tag, _chash, _start, _ev in to_publish:
         all_d_tags.add(d_tag)
     all_d_tags = sorted(all_d_tags)
 
@@ -451,7 +481,7 @@ def main():
     log.info("Queued calendar kind 31924 (d=%s) referencing %d events",
              cfg["calendar"]["d"], len(all_d_tags))
 
-    for d_tag, chash, ev in to_publish:
+    for d_tag, chash, start, ev in to_publish:
         ev.sign(pk.hex())
         relay_manager.publish_event(ev)
         log.info("Queued event %s — %s", d_tag, ev.content.split("\n", 1)[0])
@@ -460,8 +490,8 @@ def main():
     time.sleep(2)
     relay_manager.close_all_relay_connections()
 
-    for d_tag, chash, ev in to_publish:
-        record_published(conn, d_tag, chash, ev.id)
+    for d_tag, chash, start, ev in to_publish:
+        record_published(conn, d_tag, chash, ev.id, start)
 
     log.info("Done. %d events published, calendar references %d.",
              len(to_publish), len(all_d_tags))

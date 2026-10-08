@@ -13,9 +13,8 @@ for any ICS + RSS pair.
 
 Every run:
 
-1. Fetches the ICS feed (complete event list with UTC start/end times).
-2. Fetches the RSS feed (the "announcement stream" — only the most recent
-   entries, with images and tags).
+1. Fetches the ICS feed (event list with UTC start/end times).
+2. Fetches the RSS feed (the "announcement stream", with images and tags).
 3. Merges them by event URL. The ICS is the source of truth for time,
    location, UID and tags; the RSS contributes the image and, if the ICS
    lacks categories, the tags.
@@ -37,6 +36,25 @@ every event in the ICS, including old ones that may be stale or cancelled.
 
 With `rss_only = false`, every event in the ICS is published. Events
 without an RSS match simply have no image.
+
+**Note:** As of late 2026, the ICS and RSS feeds expose roughly the same
+set of events, so `rss_only` now acts more as a safety filter than a
+content filter. It is still recommended, since it keeps the calendar
+tied to the announcement stream if the feeds ever diverge again.
+
+### Calendar pruning
+
+The kind `31924` calendar lists its events via `a` tags. Events are
+removed from that listing automatically once their start time is more
+than **24 hours in the past**. The underlying kind `31923` events are
+not deleted — they remain on the relay — but they stop appearing in the
+calendar listing.
+
+The `start_ts` for each event is stored in the SQLite database. Older
+databases are migrated automatically: a `start_ts` column is added, and
+existing rows are backfilled the next time the script sees the
+corresponding event in the feeds. No events are republished during
+backfill.
 
 ---
 
@@ -86,7 +104,6 @@ Edit `config.toml`:
 secret_key = "nsec1..."            # or 64-char hex
 
 relays = [
-    "wss://basspistol.org",
     "wss://nos.lol",
 ]
 
@@ -113,14 +130,29 @@ chmod 600 config.toml
 ### Calendar (kind 31924)
 
 The `[calendar]` block defines the kind `31924` event that your published
-events request inclusion in, via an `a` tag of the form:
+events request inclusion in. Each published event carries an `a` tag of
+the form:
 
 ```
 31924:<your-pubkey>:<calendar.d>
 ```
 
+And the calendar itself lists every active event with a matching `a` tag:
+
+```
+31923:<your-pubkey>:<event.d>
+```
+
 You don't need to publish the calendar separately first — the script
 publishes it on every run (idempotent, since it's addressable via `d`).
+
+### Relay selection
+
+The script probes each configured relay for a NIP-42 `AUTH` challenge
+before publishing. Relays that require authentication are **skipped** for
+that run; only relays that accept the events without auth are used. If
+none of the configured relays accept publishing, the script aborts
+without publishing anything.
 
 ---
 
@@ -139,7 +171,7 @@ Sample output:
 ```
 INFO DRY RUN 17943: title='Blokes fantasma 33 anys resistint' image='https://...jpg' tags=['gràcia', 'concert', ...] start=1791021600 end=1791079200
 ...
-INFO DRY RUN complete. Would publish 104, skipped_no_rss=0
+INFO DRY RUN complete. Would publish 20, skipped_no_rss=0
 ```
 
 Then run for real:
@@ -183,7 +215,7 @@ truncated server-side, so polling more often doesn't recover older events.
 | `requirements.txt` | Python dependencies. |
 | `config.toml.example` | Configuration template (committed). |
 | `config.toml` | Your configuration (gitignored, mode 600). |
-| `events.db` | SQLite dedupe table (gitignored). |
+| `events.db` | SQLite dedupe + state table (gitignored). |
 | `publish.log` | Log file (gitignored). |
 | `cron.log` | Cron output (gitignored). |
 
@@ -192,17 +224,27 @@ truncated server-side, so polling more often doesn't recover older events.
 ## Dedupe behavior
 
 `events.db` stores, per event: the `d` tag, a content hash, the published
-event id, and a timestamp. On each run:
+event id, the publish timestamp, and the event's start time (`start_ts`).
+On each run:
 
 - If the event is absent → publish.
-- If the `d` tag exists but the content hash differs → republish (addressable
-  event replaces the previous version on the relay).
-- If both match → skip.
+- If the `d` tag exists but the content hash differs → republish
+  (addressable event replaces the previous version on the relay).
+- If both match → skip. If `start_ts` was missing for the row, it's
+  backfilled from the current ICS data.
 
 The content hash covers title, start, end, location, URL, image, and tags.
 
 To force a full republish, delete `events.db`. Relays will replace the
 existing events; nothing is duplicated.
+
+### Schema migration
+
+If an existing `events.db` predates the `start_ts` column, the script adds
+it automatically on startup (`ALTER TABLE published ADD COLUMN`). Existing
+rows keep their data; `start_ts` is filled in opportunistically the next
+time the script processes the matching event. Rows with a `NULL`
+`start_ts` are excluded from the calendar listing until backfilled.
 
 ---
 
@@ -228,17 +270,29 @@ installing manually you need `PIP_CONSTRAINT=build-constraints.txt` with
 `scikit-build-core<0.10` inside it.
 
 **Only some events have images**
-Expected. Images come from the RSS feed, which only carries the most
-recent entries. With `rss_only = true`, only RSS-advertised events are
-published, and all of them get images.
+Expected. Images come from the RSS feed. If the RSS has fewer entries than
+the ICS (which is no longer typical with the current endpoints), only the
+RSS-covered events will carry an image.
 
 **Event times look wrong**
 The ICS feed uses UTC (`DTSTART:...Z`) and is authoritative. The RSS
 renders times in the feed server's local timezone — ignore it.
 
-**Relay doesn't accept writes**
-Check `publish.log` for WebSocket errors. Some relays require paid access
-or reject certain kinds; try adding a third relay as a fallback.
+**A relay doesn't accept writes**
+The script already skips relays that require NIP-42 `AUTH`. If a relay
+still silently drops events, check `publish.log` for WebSocket errors —
+some relays reject specific event kinds or impose tag limits.
+
+**The calendar keeps growing**
+It shouldn't — events more than 24 hours past their start time are pruned
+from the listing on each run. If the listing seems stuck, check that the
+legacy rows have been backfilled (see **Schema migration** above).
+
+**Timeout warnings on each run**
+`pynostr` logs a WebSocket timeout while connecting. These are cosmetic:
+the events and calendar are queued before the timeout fires and are
+delivered once the socket is ready. The script finishes in a few seconds
+regardless.
 
 ---
 
