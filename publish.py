@@ -455,17 +455,20 @@ def main():
 
     log.info("Publishing to: %s", ", ".join(accepted_relays))
 
-    # Build the calendar listing.
-    # Only include events whose start_ts is set and within the grace window.
+    # Build the calendar listing, ordered chronologically by start time.
     cutoff = int(time.time()) - GRACE_SECONDS
     rows = conn.execute(
-        "SELECT d_tag FROM published WHERE start_ts IS NOT NULL AND start_ts >= ?",
+        "SELECT d_tag, start_ts FROM published "
+        "WHERE start_ts IS NOT NULL AND start_ts >= ? "
+        "ORDER BY start_ts ASC",
         (cutoff,),
     ).fetchall()
-    all_d_tags = {row[0] for row in rows}
-    for d_tag, _chash, _start, _ev in to_publish:
-        all_d_tags.add(d_tag)
-    all_d_tags = sorted(all_d_tags)
+
+    ordered = {d_tag: start_ts for d_tag, start_ts in rows}
+    for d_tag, _chash, start, _ev in to_publish:
+        ordered.setdefault(d_tag, start)
+
+    all_d_tags = [d for d, _ in sorted(ordered.items(), key=lambda kv: kv[1])]
 
     log.info("Calendar will reference %d events", len(all_d_tags))
 
