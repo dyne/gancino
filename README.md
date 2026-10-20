@@ -1,4 +1,4 @@
-# Event Gun
+# Gancino
 
 Fetch events from a Gancio's ICS + RSS feed and publish them as [NIP-52](https://github.com/nostr-protocol/nips/blob/master/52.md)
 calendar events (kind `31923`) to Nostr relays, requesting inclusion in a
@@ -77,12 +77,12 @@ wheels exist and installation is much faster.
 
 ## Install
 
-Clone to `/opt/event-gun`:
+Clone to `/opt/gancino`:
 
 ```bash
-sudo git clone <repo-url> /opt/event-gun
-sudo chown -R "$USER:$USER" /opt/event-gun
-cd /opt/event-gun
+sudo git clone <repo-url> /opt/gancino
+sudo chown -R "$USER:$USER" /opt/gancino
+cd /opt/gancino
 ./install.sh
 ```
 
@@ -163,7 +163,7 @@ published (including images and tags), and touches neither the database
 nor the relays:
 
 ```bash
-/opt/event-gun/venv/bin/python /opt/event-gun/publish.py --dry-run
+/opt/gancino/venv/bin/python /opt/gancino/publish.py --dry-run
 ```
 
 Sample output:
@@ -177,7 +177,7 @@ INFO DRY RUN complete. Would publish 20, skipped_no_rss=0
 Then run for real:
 
 ```bash
-/opt/event-gun/venv/bin/python /opt/event-gun/publish.py
+/opt/gancino/venv/bin/python /opt/gancino/publish.py
 ```
 
 Logs go to both stdout and `publish.log`.
@@ -193,7 +193,7 @@ crontab -e
 Add:
 
 ```
-*/30 * * * * /opt/event-gun/run.sh >> /opt/event-gun/cron.log 2>&1
+*/30 * * * * /opt/gancino/run.sh >> /opt/gancino/cron.log 2>&1
 ```
 
 `run.sh` resolves its own directory, `cd`s into it, and invokes the
@@ -254,13 +254,13 @@ time the script processes the matching event. Rows with a `NULL`
 You're running the script with system Python. Use the virtualenv:
 
 ```bash
-/opt/event-gun/venv/bin/python /opt/event-gun/publish.py
+/opt/gancino/venv/bin/python /opt/gancino/publish.py
 ```
 
 or activate it first:
 
 ```bash
-source /opt/event-gun/venv/bin/activate
+source /opt/gancino/venv/bin/activate
 ./publish.py
 ```
 
