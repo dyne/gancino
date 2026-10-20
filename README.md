@@ -4,9 +4,6 @@ Fetch events from a Gancio's ICS + RSS feed and publish them as [NIP-52](https:/
 calendar events (kind `31923`) to Nostr relays, requesting inclusion in a
 kind `31924` calendar.
 
-Built for [do.basspistol.org](https://do.basspistol.org) but configurable
-for any ICS + RSS pair.
-
 ---
 
 ## How it works
