@@ -43,7 +43,7 @@ tied to the announcement stream if the feeds ever diverge again.
 
 The kind `31924` calendar lists its events via `a` tags. Events are
 removed from that listing automatically once their start time is more
-than **24 hours in the past**. The underlying kind `31923` events are
+than **8 hours in the past**. The underlying kind `31923` events are
 not deleted — they remain on the relay — but they stop appearing in the
 calendar listing.
 
@@ -281,7 +281,7 @@ still silently drops events, check `publish.log` for WebSocket errors —
 some relays reject specific event kinds or impose tag limits.
 
 **The calendar keeps growing**
-It shouldn't — events more than 24 hours past their start time are pruned
+It shouldn't — events more than 8 hours past their start time are pruned
 from the listing on each run. If the listing seems stuck, check that the
 legacy rows have been backfilled (see **Schema migration** above).
 

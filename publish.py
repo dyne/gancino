@@ -39,7 +39,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "config.toml"
 
 # Events stay in the kind 31924 listing for this long after their start time.
-GRACE_SECONDS = 86400  # 24 hours
+GRACE_SECONDS = 28800 # 8 hours
 
 
 def load_config():
